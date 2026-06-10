@@ -1,0 +1,12 @@
+git clone https://github.com/xxfantasiadownxx/upscale.git
+cd upscale/
+chmod +x run.sh upscale.sh
+mkdir original_video_files/ original_frame_files/ upscaled_frame_files/ upscaled_video_files/
+echo "The video upscaler has been downloaded and directories created."
+echo "You will need to copy all of your video files into original_video_files/"
+echo ""
+echo "Once the files are copied, you will need to execute run.sh by typing ./run.sh in your terminal."
+echo ""
+echo "This is going to take a while to run, so be patient."
+echo ""
+echo "The script is meant to work through original_video_files/ one-by-one until it is complete."
