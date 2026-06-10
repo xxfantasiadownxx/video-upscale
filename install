@@ -1,4 +1,4 @@
-git clone https://github.com/xxfantasiadownxx/upscale.git
+git clone https://github.com/xxfantasiadownxx/video-upscale.git
 cd upscale/
 chmod +x run.sh upscale.sh
 mkdir original_video_files/ original_frame_files/ upscaled_frame_files/ upscaled_video_files/
