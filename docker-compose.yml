@@ -7,13 +7,14 @@ services:
     volumes:
       - ./original_video_files:/original_video_files
       - ./original_frame_files:/original_frame_files
-    entrypoint:
-      - ffmpeg
-      - -hwaccel
-      - cuda
-      - -i
-      - /original_video_files/${EPISODE_FILE}
-      - /original_frame_files/frame%08d.png
+    # Shell wrapper so spaces in $EPISODE_FILE are handled correctly
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      ffmpeg -hwaccel cuda
+      -i "/original_video_files/$${EPISODE_FILE}"
+      /original_frame_files/frame%08d.png
+    environment:
+      - EPISODE_FILE=${EPISODE_FILE}
     deploy:
       resources:
         reservations:
@@ -62,37 +63,24 @@ services:
       - ./upscaled_frame_files:/upscaled_frame_files
       - ./original_video_files:/original_video_files
       - ./upscaled_video_files:/upscaled_video_files
-    entrypoint:
-      - ffmpeg
-      - -hwaccel
-      - cuda
-      - -framerate
-      - ${EPISODE_FPS}
-      - -i
-      - /upscaled_frame_files/frame%08d.png
-      - -i
-      - /original_video_files/${EPISODE_FILE}
-      - -map
-      - "0:v"
-      - -map
-      - "1:a"
-      - -vf
-      - scale=-2:1080
-      - -r
-      - ${EPISODE_FPS}
-      - -c:v
-      - h264_nvenc
-      - -preset
-      - p4
-      - -rc
-      - vbr
-      - -cq
-      - "18"
-      - -c:a
-      - copy
-      - -vsync
-      - cfr
-      - /upscaled_video_files/${OUTPUT_FILE}
+    # Shell wrapper so spaces in $EPISODE_FILE and $OUTPUT_FILE are handled correctly
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      ffmpeg -hwaccel cuda
+      -framerate "$${EPISODE_FPS}"
+      -i /upscaled_frame_files/frame%08d.png
+      -i "/original_video_files/$${EPISODE_FILE}"
+      -map 0:v -map 1:a
+      -vf scale=-2:1080
+      -r "$${EPISODE_FPS}"
+      -c:v h264_nvenc -preset p4 -rc vbr -cq 18
+      -c:a copy
+      -vsync cfr
+      "/upscaled_video_files/$${OUTPUT_FILE}"
+    environment:
+      - EPISODE_FILE=${EPISODE_FILE}
+      - EPISODE_FPS=${EPISODE_FPS}
+      - OUTPUT_FILE=${OUTPUT_FILE}
     deploy:
       resources:
         reservations:
