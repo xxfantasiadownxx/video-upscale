@@ -7,12 +7,7 @@ services:
     volumes:
       - ./original_video_files:/original_video_files
       - ./original_frame_files:/original_frame_files
-    # Shell wrapper so spaces in $EPISODE_FILE are handled correctly
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      ffmpeg -hwaccel cuda
-      -i "/original_video_files/$${EPISODE_FILE}"
-      /original_frame_files/frame%08d.png
+    entrypoint: ["/bin/sh", "-c", "ffmpeg -hwaccel cuda -i \"/original_video_files/$$EPISODE_FILE\" /original_frame_files/frame%08d.png"]
     environment:
       - EPISODE_FILE=${EPISODE_FILE}
     deploy:
@@ -30,7 +25,6 @@ services:
     volumes:
       - ./original_frame_files:/original_frame_files
       - ./upscaled_frame_files:/upscaled_frame_files
-    # No custom entrypoint — use the image's default (inference_realesrgan.py)
     command:
       - -n
       - realesr-general-x4v3
@@ -63,20 +57,7 @@ services:
       - ./upscaled_frame_files:/upscaled_frame_files
       - ./original_video_files:/original_video_files
       - ./upscaled_video_files:/upscaled_video_files
-    # Shell wrapper so spaces in $EPISODE_FILE and $OUTPUT_FILE are handled correctly
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      ffmpeg -hwaccel cuda
-      -framerate "$${EPISODE_FPS}"
-      -i /upscaled_frame_files/frame%08d.png
-      -i "/original_video_files/$${EPISODE_FILE}"
-      -map 0:v -map 1:a
-      -vf scale=-2:1080
-      -r "$${EPISODE_FPS}"
-      -c:v h264_nvenc -preset p4 -rc vbr -cq 18
-      -c:a copy
-      -vsync cfr
-      "/upscaled_video_files/$${OUTPUT_FILE}"
+    entrypoint: ["/bin/sh", "-c", "ffmpeg -hwaccel cuda -framerate \"$$EPISODE_FPS\" -i /upscaled_frame_files/frame%08d.png -i \"/original_video_files/$$EPISODE_FILE\" -map 0:v -map 1:a -vf scale=-2:1080 -r \"$$EPISODE_FPS\" -c:v h264_nvenc -preset p4 -rc vbr -cq 18 -c:a copy -vsync cfr \"/upscaled_video_files/$$OUTPUT_FILE\""]
     environment:
       - EPISODE_FILE=${EPISODE_FILE}
       - EPISODE_FPS=${EPISODE_FPS}
