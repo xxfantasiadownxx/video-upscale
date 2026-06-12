@@ -53,41 +53,50 @@ echo ">>> Found $TOTAL_FILES file(s) to process."
 
 # ── Initialize status.json ───────────────────────
 BATCH_START=$(date +%s)
-python3 - << PYEOF
-import json, time
-files = [$(printf '"%s",' "${VIDEO_FILES[@]}" | sed 's|.*/||;s|,$||')]
+
+NAMES_FILE="$BASE_DIR/status_names.tmp"
+printf '%s\n' "${VIDEO_FILES[@]}" | sed 's|.*/||' > "$NAMES_FILE"
+
+python3 - "$NAMES_FILE" "$STATUS_FILE" "$TOTAL_FILES" "$(date +%s)" << 'PYEOF'
+import json, sys
+names_file, status_file, total, batch_start = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+with open(names_file) as f:
+    files = [l.rstrip('\n') for l in f if l.strip()]
 status = {
-  "batch_start": $(date +%s),
-  "total": $TOTAL_FILES,
+  "batch_start": batch_start,
+  "total": total,
   "succeeded": 0,
   "failed": 0,
   "current_file": "",
   "current_index": 0,
   "current_stage": "",
-  "files": [{"name": f, "status": "pending", "stage": "", "error": ""} for f in files]
+  "files": [{"name": fn, "status": "pending", "stage": "", "error": ""} for fn in files]
 }
-with open("$STATUS_FILE", "w") as fp:
+with open(status_file, "w") as fp:
     json.dump(status, fp, indent=2)
 PYEOF
+rm -f "$NAMES_FILE"
 
 update_status() {
   local index="$1" name="$2" file_status="$3" stage="$4" error="$5"
-  python3 - << PYEOF
-import json
-with open("$STATUS_FILE") as fp:
+  python3 - "$STATUS_FILE" "$index" "$name" "$file_status" "$stage" "$error" "$(date +%s)" << 'PYEOF'
+import json, sys
+status_file, index, name, file_status, stage, error, now = \
+    sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], int(sys.argv[7])
+with open(status_file) as fp:
     s = json.load(fp)
-s["current_index"] = $index + 1
-s["current_file"] = "$name"
-s["current_stage"] = "$stage"
-s["files"][$index]["status"] = "$file_status"
-s["files"][$index]["stage"] = "$stage"
-s["files"][$index]["error"] = """$error"""
-if "$file_status" == "done":
+s["current_index"] = index + 1
+s["current_file"] = name
+s["current_stage"] = stage
+s["files"][index]["status"] = file_status
+s["files"][index]["stage"] = stage
+s["files"][index]["error"] = error
+if file_status == "done":
     s["succeeded"] += 1
-elif "$file_status" == "failed":
+elif file_status == "failed":
     s["failed"] += 1
-s["elapsed"] = $(date +%s) - s["batch_start"]
-with open("$STATUS_FILE", "w") as fp:
+s["elapsed"] = now - s["batch_start"]
+with open(status_file, "w") as fp:
     json.dump(s, fp, indent=2)
 PYEOF
 }
@@ -193,14 +202,15 @@ for i in "${!VIDEO_FILES[@]}"; do
 done
 
 # Final status update
-python3 - << PYEOF
-import json, time
-with open("$STATUS_FILE") as fp:
+python3 - "$STATUS_FILE" "$(date +%s)" << 'PYEOF'
+import json, sys
+status_file, now = sys.argv[1], int(sys.argv[2])
+with open(status_file) as fp:
     s = json.load(fp)
 s["current_stage"] = "complete"
 s["current_file"] = ""
-s["elapsed"] = $(date +%s) - s["batch_start"]
-with open("$STATUS_FILE", "w") as fp:
+s["elapsed"] = now - s["batch_start"]
+with open(status_file, "w") as fp:
     json.dump(s, fp, indent=2)
 PYEOF
 
