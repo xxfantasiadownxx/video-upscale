@@ -1,6 +1,6 @@
 #!/bin/bash
-# run_anime.sh — Batch upscale animated videos to 1080p using realesr-general-x4v3
-# Usage: ./run_anime.sh
+# run.sh — Batch upscale videos to 1080p using realesr-general-x4v3
+# Usage: ./run.sh
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$BASE_DIR/original_video_files"
@@ -108,8 +108,9 @@ run_compose() {
       -f "$compose_file" \
       --project-name "$project" \
       up --abort-on-container-failure 2>&1 | tee "$log"
-  # Capture compose exit code from PIPESTATUS before anything else runs
-  local exit_code=${PIPESTATUS[0]}
+  # PIPESTATUS must be captured before ANY other command including local
+  local exit_code
+  exit_code=${PIPESTATUS[0]}
   docker compose \
     --project-directory "$BASE_DIR" \
     -f "$compose_file" \
@@ -119,14 +120,13 @@ run_compose() {
 }
 
 poll_stage() {
-  # Usage: poll_stage <log-file> <extract-container> <upscale-container> <index> <filename>
   # Watches log file and updates status as containers complete.
-  local log="$1" extract_ctr="$2" upscale_ctr="$3" idx="$4" fname="$5"
+  # Caller must: create sentinel file before starting, remove it to stop polling.
+  local log="$1" extract_ctr="$2" upscale_ctr="$3" idx="$4" fname="$5" sentinel="$6"
   local current="extracting"
-  while true; do
+  while [ -f "$sentinel" ]; do
     sleep 3
-    # Stop polling if the log file is gone or compose finished (checked by caller)
-    [ -f "$log" ] || break
+    [ -f "$sentinel" ] || break
     if [ "$current" = "extracting" ] && \
        grep -q "${extract_ctr}.*exited with code 0" "$log" 2>/dev/null; then
       current="upscaling"
@@ -174,13 +174,16 @@ for i in "${!VIDEO_FILES[@]}"; do
   echo ">>> Extracting and upscaling..."
 
   # Poll in background, run compose in foreground so exit code is reliable
-  poll_stage "$COMPOSE_LOG" "restore-ffmpeg-extract" "restore-upscale" "$i" "$FILENAME" &
+  POLL_SENTINEL="$BASE_DIR/.poll_active"
+  touch "$POLL_SENTINEL"
+  poll_stage "$COMPOSE_LOG" "restore-ffmpeg-extract" "restore-upscale" "$i" "$FILENAME" "$POLL_SENTINEL" &
   POLL_PID=$!
 
   run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG"
   STAGE1_EXIT=$?
 
-  kill $POLL_PID 2>/dev/null; wait $POLL_PID 2>/dev/null
+  rm -f "$POLL_SENTINEL"
+  wait $POLL_PID 2>/dev/null
 
   if [ $STAGE1_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
