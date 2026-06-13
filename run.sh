@@ -1,6 +1,6 @@
 #!/bin/bash
-# run.sh — Batch upscale animated videos to 1080p using realesr-general-x4v3
-# Usage: ./run.sh
+# run_anime.sh — Batch upscale animated videos to 1080p using realesr-general-x4v3
+# Usage: ./run_anime.sh
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$BASE_DIR/original_video_files"
@@ -97,6 +97,7 @@ PYEOF
 
 run_compose() {
   # Usage: run_compose <compose-file> <project-name> <log-file>
+  # Returns the docker compose exit code reliably.
   local compose_file="$1" project="$2" log="$3"
   : > "$log"
   EPISODE_FILE="$EPISODE_FILE" \
@@ -107,15 +108,31 @@ run_compose() {
       -f "$compose_file" \
       --project-name "$project" \
       up --abort-on-container-failure 2>&1 | tee "$log"
+  # Capture compose exit code from PIPESTATUS before anything else runs
   local exit_code=${PIPESTATUS[0]}
-  # Ensure tee has flushed
-  sync
   docker compose \
     --project-directory "$BASE_DIR" \
     -f "$compose_file" \
     --project-name "$project" \
     down 2>/dev/null
   return $exit_code
+}
+
+poll_stage() {
+  # Usage: poll_stage <log-file> <extract-container> <upscale-container> <index> <filename>
+  # Watches log file and updates status as containers complete.
+  local log="$1" extract_ctr="$2" upscale_ctr="$3" idx="$4" fname="$5"
+  local current="extracting"
+  while true; do
+    sleep 3
+    # Stop polling if the log file is gone or compose finished (checked by caller)
+    [ -f "$log" ] || break
+    if [ "$current" = "extracting" ] && \
+       grep -q "${extract_ctr}.*exited with code 0" "$log" 2>/dev/null; then
+      current="upscaling"
+      update_status "$idx" "$fname" "running" "upscaling" ""
+    fi
+  done
 }
 
 SUCCEEDED=0; FAILED=0; FAILED_FILES=()
@@ -156,19 +173,14 @@ for i in "${!VIDEO_FILES[@]}"; do
   update_status "$i" "$FILENAME" "running" "extracting" ""
   echo ">>> Extracting and upscaling..."
 
-  run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG" &
-  COMPOSE_PID=$!
-  CURRENT_STAGE="extracting"
-  while kill -0 $COMPOSE_PID 2>/dev/null; do
-    if [ "$CURRENT_STAGE" = "extracting" ] && \
-       grep -q "restore-ffmpeg-extract.*exited with code 0" "$COMPOSE_LOG" 2>/dev/null; then
-      CURRENT_STAGE="upscaling"
-      update_status "$i" "$FILENAME" "running" "upscaling" ""
-    fi
-    sleep 3
-  done
-  wait $COMPOSE_PID
+  # Poll in background, run compose in foreground so exit code is reliable
+  poll_stage "$COMPOSE_LOG" "restore-ffmpeg-extract" "restore-upscale" "$i" "$FILENAME" &
+  POLL_PID=$!
+
+  run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG"
   STAGE1_EXIT=$?
+
+  kill $POLL_PID 2>/dev/null; wait $POLL_PID 2>/dev/null
 
   if [ $STAGE1_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
