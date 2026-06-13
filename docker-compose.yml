@@ -1,5 +1,4 @@
 # Usage: called by run.sh — do not run directly.
-# run.sh sets: EPISODE_FILE, OUTPUT_FILE, EPISODE_FPS
 services:
   extract:
     image: jrottenberg/ffmpeg:4.4-nvidia
@@ -49,29 +48,4 @@ services:
     runtime: nvidia
     depends_on:
       extract:
-        condition: service_completed_successfully
-
-  reassemble:
-    image: jrottenberg/ffmpeg:4.4-nvidia
-    container_name: restore-ffmpeg-reassemble
-    volumes:
-      - ./upscaled_frame_files:/upscaled_frame_files
-      - ./original_video_files:/original_video_files
-      - ./upscaled_video_files:/upscaled_video_files
-      - ./scripts/reassemble.sh:/reassemble.sh:ro
-    entrypoint: ["/bin/sh", "/reassemble.sh"]
-    environment:
-      - EPISODE_FILE=${EPISODE_FILE}
-      - EPISODE_FPS=${EPISODE_FPS}
-      - OUTPUT_FILE=${OUTPUT_FILE}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, video, utility]
-    runtime: nvidia
-    depends_on:
-      upscale:
         condition: service_completed_successfully
