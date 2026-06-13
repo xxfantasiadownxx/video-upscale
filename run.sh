@@ -1,5 +1,5 @@
 #!/bin/bash
-# run.sh — Batch upscale videos to 1080p using realesr-general-x4v3
+# run.sh — Batch upscale animated videos to 1080p using realesr-general-x4v3
 # Usage: ./run.sh
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,16 +43,10 @@ mapfile -d '' VIDEO_FILES < <(find "$INPUT_DIR" -maxdepth 1 -type f \( \
   \) -print0 | sort -z)
 
 TOTAL_FILES=${#VIDEO_FILES[@]}
-
-if [ "$TOTAL_FILES" -eq 0 ]; then
-  echo "ERROR: No video files found in $INPUT_DIR"
-  exit 1
-fi
-
+if [ "$TOTAL_FILES" -eq 0 ]; then echo "ERROR: No video files found in $INPUT_DIR"; exit 1; fi
 echo ">>> Found $TOTAL_FILES file(s) to process."
 
 BATCH_START=$(date +%s)
-
 NAMES_FILE="$BASE_DIR/status_names.tmp"
 printf '%s\n' "${VIDEO_FILES[@]}" | sed 's|.*/||' > "$NAMES_FILE"
 
@@ -62,17 +56,11 @@ names_file, status_file, total, batch_start = sys.argv[1], sys.argv[2], int(sys.
 with open(names_file) as f:
     files = [l.rstrip('\n') for l in f if l.strip()]
 status = {
-  "batch_start": batch_start,
-  "total": total,
-  "succeeded": 0,
-  "failed": 0,
-  "current_file": "",
-  "current_index": 0,
-  "current_stage": "",
-  "files": [{"name": fn, "status": "pending", "stage": "", "error": ""} for fn in files]
+  "batch_start": batch_start, "total": total, "succeeded": 0, "failed": 0,
+  "current_file": "", "current_index": 0, "current_stage": "",
+  "files": [{"name": fn, "status": "pending", "stage": "", "error": "", "start_time": None, "end_time": None} for fn in files]
 }
-with open(status_file, "w") as fp:
-    json.dump(status, fp, indent=2)
+with open(status_file, "w") as fp: json.dump(status, fp, indent=2)
 PYEOF
 rm -f "$NAMES_FILE"
 
@@ -82,47 +70,70 @@ update_status() {
 import json, sys
 status_file, index, name, file_status, stage, error, now = \
     sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], int(sys.argv[7])
-with open(status_file) as fp:
-    s = json.load(fp)
+with open(status_file) as fp: s = json.load(fp)
 s["current_index"] = index + 1
 s["current_file"] = name
 s["current_stage"] = stage
 s["files"][index]["status"] = file_status
 s["files"][index]["stage"] = stage
 s["files"][index]["error"] = error
-if file_status == "done":
-    s["succeeded"] += 1
-elif file_status == "failed":
-    s["failed"] += 1
+if file_status == "done": s["succeeded"] += 1
+elif file_status == "failed": s["failed"] += 1
 s["elapsed"] = now - s["batch_start"]
-with open(status_file, "w") as fp:
-    json.dump(s, fp, indent=2)
+with open(status_file, "w") as fp: json.dump(s, fp, indent=2)
 PYEOF
 }
 
-SUCCEEDED=0
-FAILED=0
-FAILED_FILES=()
+set_file_time() {
+  local index="$1" field="$2"
+  python3 - "$STATUS_FILE" "$index" "$field" "$(date +%s)" << 'PYEOF'
+import json, sys
+sf, idx, field, ts = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+with open(sf) as fp: s = json.load(fp)
+s["files"][idx][field] = ts
+with open(sf, "w") as fp: json.dump(s, fp, indent=2)
+PYEOF
+}
+
+run_compose() {
+  # Usage: run_compose <compose-file> <project-name> <log-file>
+  local compose_file="$1" project="$2" log="$3"
+  : > "$log"
+  EPISODE_FILE="$EPISODE_FILE" \
+    EPISODE_FPS="$EPISODE_FPS" \
+    OUTPUT_FILE="$OUTPUT_FILE" \
+    docker compose \
+      --project-directory "$BASE_DIR" \
+      -f "$compose_file" \
+      --project-name "$project" \
+      up --abort-on-container-failure 2>&1 | tee "$log"
+  local exit_code=${PIPESTATUS[0]}
+  # Ensure tee has flushed
+  sync
+  docker compose \
+    --project-directory "$BASE_DIR" \
+    -f "$compose_file" \
+    --project-name "$project" \
+    down 2>/dev/null
+  return $exit_code
+}
+
+SUCCEEDED=0; FAILED=0; FAILED_FILES=()
 
 for i in "${!VIDEO_FILES[@]}"; do
   FILE="${VIDEO_FILES[$i]}"
   FILENAME=$(basename "$FILE")
   FILE_NUM=$(( i + 1 ))
   LOG_FILE="$OUTPUT_DIR/${FILENAME%.*}_error.log"
+  EPISODE_FILE="$FILENAME"
+  OUTPUT_FILE="${FILENAME%.*}_upscaled_1080p.mkv"
 
   echo ""
   echo "================================================"
   echo "  File $FILE_NUM of $TOTAL_FILES : $FILENAME"
   echo "================================================"
 
-  python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
-import json, sys
-sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-with open(sf) as fp: s = json.load(fp)
-s["files"][idx]["start_time"] = ts
-s["files"][idx]["end_time"] = None
-with open(sf, "w") as fp: json.dump(s, fp, indent=2)
-PYEOF
+  set_file_time "$i" "start_time"
   update_status "$i" "$FILENAME" "running" "probing" ""
 
   echo ">>> Probing framerate..."
@@ -134,121 +145,107 @@ PYEOF
     -of default=noprint_wrappers=1:nokey=1 \
     -show_entries stream=r_frame_rate \
     /original_video_files/"$FILENAME" 2>/dev/null | head -n 1)
-
   EPISODE_FPS=$(echo "$RAW_FPS" | awk -F'/' '{printf "%.3f", $1/$2}')
   EPISODE_FPS=${EPISODE_FPS:-29.97}
   echo ">>> Framerate: $EPISODE_FPS fps"
 
-  OUTPUT_FILE="${FILENAME%.*}_upscaled_1080p.mkv"
-
   echo ">>> Cleaning up leftover frames..."
-  rm -f "$FRAMES_DIR"/frame*.png
-  rm -f "$UPSCALED_FRAMES_DIR"/frame*.png
+  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
 
+  # ── STAGE 1: Extract + Upscale ──────────────────
   update_status "$i" "$FILENAME" "running" "extracting" ""
-  : > "$COMPOSE_LOG"
+  echo ">>> Extracting and upscaling..."
 
-  echo ">>> Starting pipeline..."
-
-  # Run compose in background, tee to log and stdout for live visibility
-  EPISODE_FILE="$FILENAME" \
-    EPISODE_FPS="$EPISODE_FPS" \
-    OUTPUT_FILE="$OUTPUT_FILE" \
-    docker compose \
-      --project-directory "$BASE_DIR" \
-      --project-name upscale-general \
-      up --abort-on-container-failure 2>&1 | tee "$COMPOSE_LOG" &
+  run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG" &
   COMPOSE_PID=$!
-
-  # Poll log and advance stage as each container completes
   CURRENT_STAGE="extracting"
   while kill -0 $COMPOSE_PID 2>/dev/null; do
     if [ "$CURRENT_STAGE" = "extracting" ] && \
        grep -q "restore-ffmpeg-extract.*exited with code 0" "$COMPOSE_LOG" 2>/dev/null; then
       CURRENT_STAGE="upscaling"
       update_status "$i" "$FILENAME" "running" "upscaling" ""
-    elif [ "$CURRENT_STAGE" = "upscaling" ] && \
-         grep -q "restore-upscale.*exited with code 0" "$COMPOSE_LOG" 2>/dev/null; then
-      CURRENT_STAGE="reassembling"
-      update_status "$i" "$FILENAME" "running" "reassembling" ""
     fi
     sleep 3
   done
   wait $COMPOSE_PID
-  COMPOSE_EXIT=$?
+  STAGE1_EXIT=$?
 
-  docker compose \
-    --project-directory "$BASE_DIR" \
-    --project-name upscale-general \
-    down 2>/dev/null
-
-  if [ $COMPOSE_EXIT -ne 0 ]; then
+  if [ $STAGE1_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
-    echo "ERROR: Pipeline failed for $FILENAME"
+    echo "ERROR: Extract/upscale failed for $FILENAME"
     cp "$COMPOSE_LOG" "$LOG_FILE"
-    {
-      echo ""
-      echo "=== SUMMARY ==="
-      echo "$ERROR_MSG"
-    } >> "$LOG_FILE"
-    echo ">>> Error log written to $LOG_FILE"
+    echo -e "\n=== SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
-    python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
-import json, sys
-sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-with open(sf) as fp: s = json.load(fp)
-s["files"][idx]["end_time"] = ts
-with open(sf, "w") as fp: json.dump(s, fp, indent=2)
-PYEOF
-    FAILED=$(( FAILED + 1 ))
-    FAILED_FILES+=("$FILENAME")
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
     continue
   fi
 
-  # Real-ESRGAN appends _out to filenames; rename back to frame%08d.png for ffmpeg
+  # ── RENAME frames: frame*_out.png → frame%08d.png ──
   echo ">>> Renaming upscaled frames..."
   COUNT=1
   for F in $(ls "$UPSCALED_FRAMES_DIR"/frame*_out.png 2>/dev/null | sort); do
-    NEW=$(printf "$UPSCALED_FRAMES_DIR/frame%08d.png" $COUNT)
-    mv "$F" "$NEW"
+    mv "$F" "$(printf "$UPSCALED_FRAMES_DIR/frame%08d.png" $COUNT)"
     COUNT=$(( COUNT + 1 ))
   done
+  echo ">>> Renamed $(( COUNT - 1 )) frames."
 
+  if [ $(( COUNT - 1 )) -eq 0 ]; then
+    echo "ERROR: No upscaled frames found after renaming — upscale may have failed silently."
+    echo "No upscaled frames found after rename." > "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found."
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # ── STAGE 2: Reassemble ─────────────────────────
+  update_status "$i" "$FILENAME" "running" "reassembling" ""
+  echo ">>> Reassembling..."
+
+  REASSEMBLE_LOG="$BASE_DIR/reassemble_run.log"
+  run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-general-reassemble" "$REASSEMBLE_LOG"
+  STAGE2_EXIT=$?
+
+  if [ $STAGE2_EXIT -ne 0 ]; then
+    ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$REASSEMBLE_LOG" | tail -5)
+    echo "ERROR: Reassembly failed for $FILENAME"
+    cat "$COMPOSE_LOG" "$REASSEMBLE_LOG" > "$LOG_FILE"
+    echo -e "\n=== REASSEMBLE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    echo ">>> Error log written to $LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "Reassembly failed: $ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # ── Archive + cleanup ───────────────────────────
   echo ">>> Archiving original..."
   mv "$FILE" "$INPUT_DIR/${FILENAME%.*}_original.${FILENAME##*.}"
 
   echo ">>> Cleaning up frames..."
-  rm -f "$FRAMES_DIR"/frame*.png
-  rm -f "$UPSCALED_FRAMES_DIR"/frame*.png
+  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
 
   update_status "$i" "$FILENAME" "done" "complete" ""
-  python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
-import json, sys
-sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-with open(sf) as fp: s = json.load(fp)
-s["files"][idx]["end_time"] = ts
-with open(sf, "w") as fp: json.dump(s, fp, indent=2)
-PYEOF
+  set_file_time "$i" "end_time"
   SUCCEEDED=$(( SUCCEEDED + 1 ))
   echo ">>> Done : $OUTPUT_DIR/$OUTPUT_FILE"
 done
 
 python3 - "$STATUS_FILE" "$(date +%s)" << 'PYEOF'
 import json, sys
-status_file, now = sys.argv[1], int(sys.argv[2])
-with open(status_file) as fp:
-    s = json.load(fp)
-s["current_stage"] = "complete"
-s["current_file"] = ""
+sf, now = sys.argv[1], int(sys.argv[2])
+with open(sf) as fp: s = json.load(fp)
+s["current_stage"] = "complete"; s["current_file"] = ""
 s["elapsed"] = now - s["batch_start"]
-with open(status_file, "w") as fp:
-    json.dump(s, fp, indent=2)
+with open(sf, "w") as fp: json.dump(s, fp, indent=2)
 PYEOF
 
 BATCH_ELAPSED=$(( $(date +%s) - BATCH_START ))
 BATCH_FMT=$(printf "%02d:%02d:%02d" $(( BATCH_ELAPSED/3600 )) $(( (BATCH_ELAPSED%3600)/60 )) $(( BATCH_ELAPSED%60 )))
-
 echo ""
 echo "================================================"
 echo "  Batch complete!"
