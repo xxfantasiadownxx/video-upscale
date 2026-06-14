@@ -97,25 +97,28 @@ PYEOF
 
 run_compose() {
   # Usage: run_compose <compose-file> <project-name> <log-file>
-  # Returns the docker compose exit code reliably.
+  # cd into BASE_DIR first so ./volume paths in compose files resolve correctly.
   local compose_file="$1" project="$2" log="$3"
   : > "$log"
-  EPISODE_FILE="$EPISODE_FILE" \
-    EPISODE_FPS="$EPISODE_FPS" \
-    OUTPUT_FILE="$OUTPUT_FILE" \
-    docker compose \
-      --project-directory "$BASE_DIR" \
-      -f "$compose_file" \
-      --project-name "$project" \
-      up --abort-on-container-failure 2>&1 | tee "$log"
-  # PIPESTATUS must be captured before ANY other command including local
+  (
+    cd "$BASE_DIR" || exit 1
+    EPISODE_FILE="$EPISODE_FILE" \
+      EPISODE_FPS="$EPISODE_FPS" \
+      OUTPUT_FILE="$OUTPUT_FILE" \
+      docker compose \
+        -f "$compose_file" \
+        --project-name "$project" \
+        up --abort-on-container-failure 2>&1
+  ) | tee "$log"
   local exit_code
   exit_code=${PIPESTATUS[0]}
-  docker compose \
-    --project-directory "$BASE_DIR" \
-    -f "$compose_file" \
-    --project-name "$project" \
-    down 2>/dev/null
+  (
+    cd "$BASE_DIR" || exit 1
+    docker compose \
+      -f "$compose_file" \
+      --project-name "$project" \
+      down 2>/dev/null
+  )
   return $exit_code
 }
 
