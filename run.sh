@@ -197,16 +197,13 @@ for i in "${!VIDEO_FILES[@]}"; do
     continue
   fi
 
-  # ── RENAME frames: frame*_out.png → frame%08d.png ──
-  echo ">>> Renaming upscaled frames..."
-  COUNT=1
-  for F in $(ls "$UPSCALED_FRAMES_DIR"/frame*_out.png 2>/dev/null | sort); do
-    mv "$F" "$(printf "$UPSCALED_FRAMES_DIR/frame%08d.png" $COUNT)"
-    COUNT=$(( COUNT + 1 ))
-  done
-  echo ">>> Renamed $(( COUNT - 1 )) frames."
+  # Real-ESRGAN writes directly as frame%08d.png — no rename needed.
+  # Just verify frames are actually there before proceeding.
+  echo ">>> Verifying upscaled frames..."
+  UPSCALED_COUNT=$(ls "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
+  echo ">>> Found $UPSCALED_COUNT upscaled frames."
 
-  if [ $(( COUNT - 1 )) -eq 0 ]; then
+  if [ "$UPSCALED_COUNT" -eq 0 ]; then
     echo "ERROR: No upscaled frames found after renaming — upscale may have failed silently."
     echo "No upscaled frames found after rename." > "$LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found."
