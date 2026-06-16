@@ -200,8 +200,14 @@ for i in "${!VIDEO_FILES[@]}"; do
     continue
   fi
 
-  # Real-ESRGAN writes directly as frame%08d.png — no rename needed.
-  # Just verify frames are actually there before proceeding.
+  # Real-ESRGAN appends _out to output filenames — rename before reassembly.
+  echo ">>> Renaming upscaled frames..."
+  for f in "$UPSCALED_FRAMES_DIR"/frame*_out.png; do
+    [ -f "$f" ] || continue
+    base=$(basename "$f" _out.png)
+    mv "$f" "$UPSCALED_FRAMES_DIR/${base}.png"
+  done
+
   echo ">>> Verifying upscaled frames..."
   UPSCALED_COUNT=$(ls "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
   echo ">>> Found $UPSCALED_COUNT upscaled frames."
