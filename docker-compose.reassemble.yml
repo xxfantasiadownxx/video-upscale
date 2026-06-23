@@ -1,8 +1,8 @@
-# Usage: called by run.sh after frame renaming — do not run directly.
+# Usage: called by run_anime.sh after frame renaming — do not run directly.
 services:
   reassemble:
     image: jrottenberg/ffmpeg:4.4-nvidia
-    container_name: restore-ffmpeg-reassemble
+    container_name: anime-ffmpeg-reassemble
     volumes:
       - ./upscaled_frame_files:/upscaled_frame_files
       - ./original_video_files:/original_video_files
@@ -13,6 +13,7 @@ services:
       - EPISODE_FILE=${EPISODE_FILE}
       - EPISODE_FPS=${EPISODE_FPS}
       - OUTPUT_FILE=${OUTPUT_FILE}
+      - HAS_AUDIO=${HAS_AUDIO}
     deploy:
       resources:
         reservations:
