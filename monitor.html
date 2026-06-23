@@ -91,7 +91,7 @@ let batchStartEpoch = null;   // unix seconds from status.json
 let loadedAt = null;          // Date.now() when we last fetched
 let lastData = null;
 
-const STAGES = ["probing","extracting","upscaling","reassembling","complete"];
+const STAGES = ["probing","normalizing","extracting","upscaling","reassembling","complete"];
 function stageIndex(s) { return STAGES.indexOf(s); }
 
 function fmt(sec) {
