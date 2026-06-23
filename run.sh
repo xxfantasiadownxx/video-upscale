@@ -13,6 +13,31 @@ COMPOSE_LOG="$BASE_DIR/compose_run.log"
 
 mkdir -p "$INPUT_DIR" "$FRAMES_DIR" "$UPSCALED_FRAMES_DIR" "$OUTPUT_DIR" "$SCRIPTS_DIR"
 
+cat > "$SCRIPTS_DIR/normalize.sh" << 'EOF'
+#!/bin/sh
+# Re-encodes any input into a known-good intermediate: CFR, deinterlaced,
+# AAC stereo (or no audio track if source has none), MKV container.
+# This guarantees extract/reassemble downstream always see a consistent format.
+VF_CHAIN="$NORMALIZE_VF"
+if [ -n "$HAS_AUDIO" ]; then
+  ffmpeg -hwaccel cuda -i "/original_video_files/$EPISODE_FILE" \
+    -vf "$VF_CHAIN" \
+    -r "$NORMALIZE_FPS" \
+    -c:v h264_nvenc -preset p4 -rc vbr -cq 16 \
+    -c:a aac -b:a 192k -ac 2 \
+    -vsync cfr \
+    "/original_video_files/$NORMALIZED_FILE"
+else
+  ffmpeg -hwaccel cuda -i "/original_video_files/$EPISODE_FILE" \
+    -vf "$VF_CHAIN" \
+    -r "$NORMALIZE_FPS" \
+    -c:v h264_nvenc -preset p4 -rc vbr -cq 16 \
+    -an \
+    -vsync cfr \
+    "/original_video_files/$NORMALIZED_FILE"
+fi
+EOF
+
 cat > "$SCRIPTS_DIR/extract.sh" << 'EOF'
 #!/bin/sh
 ffmpeg -hwaccel cuda -i "/original_video_files/$EPISODE_FILE" /original_frame_files/frame%08d.png
@@ -20,20 +45,32 @@ EOF
 
 cat > "$SCRIPTS_DIR/reassemble.sh" << 'EOF'
 #!/bin/sh
-ffmpeg -hwaccel cuda \
-  -framerate "$EPISODE_FPS" \
-  -i /upscaled_frame_files/frame%08d.png \
-  -i "/original_video_files/$EPISODE_FILE" \
-  -map 0:v -map 1:a \
-  -vf scale=-2:1080 \
-  -r "$EPISODE_FPS" \
-  -c:v h264_nvenc -preset p4 -rc vbr -cq 18 \
-  -c:a copy \
-  -vsync cfr \
-  "/upscaled_video_files/$OUTPUT_FILE"
+if [ -n "$HAS_AUDIO" ]; then
+  ffmpeg -hwaccel cuda \
+    -framerate "$EPISODE_FPS" \
+    -i /upscaled_frame_files/frame%08d.png \
+    -i "/original_video_files/$EPISODE_FILE" \
+    -map 0:v -map 1:a \
+    -vf scale=-2:1080 \
+    -r "$EPISODE_FPS" \
+    -c:v h264_nvenc -preset p4 -rc vbr -cq 18 \
+    -c:a copy \
+    -vsync cfr \
+    "/upscaled_video_files/$OUTPUT_FILE"
+else
+  ffmpeg -hwaccel cuda \
+    -framerate "$EPISODE_FPS" \
+    -i /upscaled_frame_files/frame%08d.png \
+    -map 0:v \
+    -vf scale=-2:1080 \
+    -r "$EPISODE_FPS" \
+    -c:v h264_nvenc -preset p4 -rc vbr -cq 18 \
+    -vsync cfr \
+    "/upscaled_video_files/$OUTPUT_FILE"
+fi
 EOF
 
-chmod +x "$SCRIPTS_DIR/extract.sh" "$SCRIPTS_DIR/reassemble.sh"
+chmod +x "$SCRIPTS_DIR/normalize.sh" "$SCRIPTS_DIR/extract.sh" "$SCRIPTS_DIR/reassemble.sh"
 
 # ── Find all video files ──────────────────────────
 mapfile -d '' VIDEO_FILES < <(find "$INPUT_DIR" -maxdepth 1 -type f \( \
@@ -105,6 +142,7 @@ run_compose() {
     EPISODE_FILE="$EPISODE_FILE" \
       EPISODE_FPS="$EPISODE_FPS" \
       OUTPUT_FILE="$OUTPUT_FILE" \
+      HAS_AUDIO="$HAS_AUDIO" \
       docker compose \
         -f "$compose_file" \
         --project-name "$project" \
@@ -156,18 +194,157 @@ for i in "${!VIDEO_FILES[@]}"; do
   set_file_time "$i" "start_time"
   update_status "$i" "$FILENAME" "running" "probing" ""
 
-  echo ">>> Probing framerate..."
-  RAW_FPS=$(docker run --rm \
+  echo ">>> Probing source..."
+  PROBE_JSON=$(docker run --rm \
     --entrypoint ffprobe \
     -v "$INPUT_DIR":/original_video_files \
     jrottenberg/ffmpeg:4.4-nvidia \
     -v error -select_streams v:0 \
-    -of default=noprint_wrappers=1:nokey=1 \
-    -show_entries stream=r_frame_rate \
-    /original_video_files/"$FILENAME" 2>/dev/null | head -n 1)
-  EPISODE_FPS=$(echo "$RAW_FPS" | awk -F'/' '{printf "%.3f", $1/$2}')
-  EPISODE_FPS=${EPISODE_FPS:-29.97}
-  echo ">>> Framerate: $EPISODE_FPS fps"
+    -show_entries stream=r_frame_rate,field_order,width,height \
+    -show_entries format=duration \
+    -of json \
+    /original_video_files/"$FILENAME" 2>/dev/null)
+
+  RAW_FPS=$(echo "$PROBE_JSON" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(d['streams'][0].get('r_frame_rate','0/0'))
+except Exception:
+    print('0/0')
+")
+  FIELD_ORDER=$(echo "$PROBE_JSON" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(d['streams'][0].get('field_order','unknown'))
+except Exception:
+    print('unknown')
+")
+  DURATION_SEC=$(echo "$PROBE_JSON" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(int(float(d.get('format',{}).get('duration','0'))))
+except Exception:
+    print(0)
+")
+  WIDTH=$(echo "$PROBE_JSON" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(int(d['streams'][0].get('width',1280)))
+except Exception:
+    print(1280)
+")
+  HEIGHT=$(echo "$PROBE_JSON" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print(int(d['streams'][0].get('height',720)))
+except Exception:
+    print(720)
+")
+
+  # Validate FPS: must parse to a sane positive number, not 0/0, inf, or nan.
+  EPISODE_FPS=$(python3 -c "
+raw = '$RAW_FPS'
+try:
+    num, den = raw.split('/')
+    num, den = float(num), float(den)
+    fps = num/den if den != 0 else 0
+    if fps <= 0 or fps > 240 or fps != fps:  # fps!=fps catches nan
+        raise ValueError
+    print(f'{fps:.3f}')
+except Exception:
+    print('29.970')
+")
+  echo ">>> Detected framerate: $EPISODE_FPS fps (raw: $RAW_FPS)"
+
+  IS_INTERLACED="false"
+  case "$FIELD_ORDER" in
+    tt|bb|tb|bt) IS_INTERLACED="true" ;;
+  esac
+  echo ">>> Field order: $FIELD_ORDER (interlaced: $IS_INTERLACED)"
+
+  AUDIO_STREAM_COUNT=$(docker run --rm \
+    --entrypoint ffprobe \
+    -v "$INPUT_DIR":/original_video_files \
+    jrottenberg/ffmpeg:4.4-nvidia \
+    -v error -select_streams a \
+    -show_entries stream=index \
+    -of csv=p=0 \
+    /original_video_files/"$FILENAME" 2>/dev/null | wc -l)
+  if [ "$AUDIO_STREAM_COUNT" -gt 0 ]; then
+    HAS_AUDIO="1"
+  else
+    HAS_AUDIO=""
+  fi
+  echo ">>> Audio streams: $AUDIO_STREAM_COUNT"
+
+  # Disk space guard — rough estimate: raw PNG frames at source resolution,
+  # roughly 3 bytes/pixel uncompressed-ish for PNG, x2 for upscaled set too.
+  AVAIL_KB=$(df -Pk "$BASE_DIR" | awk 'NR==2{print $4}')
+  EST_FRAMES=$(( DURATION_SEC > 0 ? DURATION_SEC * 24 : 1000 ))
+  EST_BYTES_PER_FRAME=$(( WIDTH * HEIGHT * 3 ))
+  EST_NEEDED_KB=$(( (EST_FRAMES * EST_BYTES_PER_FRAME * 6) / 1024 ))  # x6: orig+upscaled frames, safety margin
+  if [ "$AVAIL_KB" -lt "$EST_NEEDED_KB" ]; then
+    ERROR_MSG="Insufficient disk space: ~${EST_NEEDED_KB}KB estimated needed, ${AVAIL_KB}KB available."
+    echo "ERROR: $ERROR_MSG"
+    echo "$ERROR_MSG" > "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    continue
+  fi
+  echo ">>> Disk check OK: ${AVAIL_KB}KB available, ~${EST_NEEDED_KB}KB estimated needed."
+
+  # ── STAGE 0: Normalize ───────────────────────────
+  # Re-encode into a known-good intermediate (CFR, deinterlaced, AAC/none audio)
+  # so extract/upscale/reassemble behave identically regardless of source format/codec.
+  update_status "$i" "$FILENAME" "running" "normalizing" ""
+  echo ">>> Normalizing source format..."
+
+  if [ "$IS_INTERLACED" = "true" ]; then
+    NORMALIZE_VF="yadif,format=yuv420p"
+  else
+    NORMALIZE_VF="format=yuv420p"
+  fi
+  NORMALIZE_FPS="$EPISODE_FPS"
+  NORMALIZED_FILE="${FILENAME%.*}_normalized.mkv"
+
+  NORMALIZE_LOG="$BASE_DIR/normalize_run.log"
+  docker run --rm \
+    -v "$INPUT_DIR":/original_video_files \
+    -v "$SCRIPTS_DIR/normalize.sh":/normalize.sh:ro \
+    --runtime nvidia \
+    -e EPISODE_FILE="$FILENAME" \
+    -e NORMALIZE_VF="$NORMALIZE_VF" \
+    -e NORMALIZE_FPS="$NORMALIZE_FPS" \
+    -e NORMALIZED_FILE="$NORMALIZED_FILE" \
+    -e HAS_AUDIO="$HAS_AUDIO" \
+    --entrypoint /bin/sh \
+    jrottenberg/ffmpeg:4.4-nvidia \
+    /normalize.sh \
+    > "$NORMALIZE_LOG" 2>&1
+  NORMALIZE_EXIT=$?
+
+  if [ $NORMALIZE_EXIT -ne 0 ] || [ ! -f "$INPUT_DIR/$NORMALIZED_FILE" ]; then
+    ERROR_MSG=$(grep -E "(Error|error|failed)" "$NORMALIZE_LOG" | tail -5)
+    echo "ERROR: Normalization failed for $FILENAME"
+    cp "$NORMALIZE_LOG" "$LOG_FILE"
+    echo -e "\n=== NORMALIZE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "Normalization failed: $ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    continue
+  fi
+
+  echo ">>> Normalized: $NORMALIZED_FILE — removing original source."
+  rm -f "$FILE"
+  # From this point forward, operate on the normalized file.
+  EPISODE_FILE="$NORMALIZED_FILE"
+  FILE="$INPUT_DIR/$NORMALIZED_FILE"
 
   echo ">>> Cleaning up leftover frames..."
   rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
@@ -244,7 +421,9 @@ for i in "${!VIDEO_FILES[@]}"; do
   fi
 
   # ── Archive + cleanup ───────────────────────────
-  echo ">>> Archiving original..."
+  # Note: the true original was deleted right after normalization (per config).
+  # We archive the normalized intermediate that was actually used for processing.
+  echo ">>> Archiving normalized source..."
   mv "$FILE" "$INPUT_DIR/${FILENAME%.*}_original.${FILENAME##*.}"
 
   echo ">>> Cleaning up frames..."
