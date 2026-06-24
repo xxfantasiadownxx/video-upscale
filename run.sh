@@ -13,6 +13,17 @@ COMPOSE_LOG="$BASE_DIR/compose_run.log"
 
 mkdir -p "$INPUT_DIR" "$FRAMES_DIR" "$UPSCALED_FRAMES_DIR" "$OUTPUT_DIR" "$SCRIPTS_DIR"
 
+# Clean up normalized intermediates left behind by an interrupted prior run.
+# These are debris, not new sources — if a run died between normalizing and
+# archiving, leaving one of these around would otherwise get it picked up
+# as a "new" source file and re-normalized on top of itself next time.
+LEFTOVER_NORMALIZED=$(find "$INPUT_DIR" -maxdepth 1 -type f -iname "*_normalized.mkv" 2>/dev/null)
+if [ -n "$LEFTOVER_NORMALIZED" ]; then
+  echo ">>> Removing leftover normalized file(s) from a prior interrupted run:"
+  echo "$LEFTOVER_NORMALIZED" | sed 's/^/    /'
+  echo "$LEFTOVER_NORMALIZED" | xargs -d '\n' rm -f
+fi
+
 cat > "$SCRIPTS_DIR/normalize.sh" << 'EOF'
 #!/bin/sh
 # Re-encodes any input into a known-good intermediate: CFR, deinterlaced,
@@ -83,11 +94,16 @@ EOF
 chmod +x "$SCRIPTS_DIR/normalize.sh" "$SCRIPTS_DIR/extract.sh" "$SCRIPTS_DIR/reassemble.sh"
 
 # ── Find all video files ──────────────────────────
+# Exclude our own intermediate/archived artifacts so a leftover file from
+# an interrupted prior run doesn't get treated as a brand-new source and
+# re-normalized on top of itself (causes _normalized_normalized_... chains).
 mapfile -d '' VIDEO_FILES < <(find "$INPUT_DIR" -maxdepth 1 -type f \( \
     -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" -o \
     -iname "*.mov" -o -iname "*.ts"  -o -iname "*.m2ts" -o \
     -iname "*.mpg" -o -iname "*.mpeg" -o -iname "*.wmv" \
-  \) -print0 | sort -z)
+  \) -not -iname "*_normalized.mkv" \
+     -not -iname "*_original.*" \
+  -print0 | sort -z)
 
 TOTAL_FILES=${#VIDEO_FILES[@]}
 if [ "$TOTAL_FILES" -eq 0 ]; then echo "ERROR: No video files found in $INPUT_DIR"; exit 1; fi
