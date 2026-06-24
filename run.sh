@@ -45,6 +45,7 @@ EOF
 
 cat > "$SCRIPTS_DIR/reassemble.sh" << 'EOF'
 #!/bin/sh
+set -e
 if [ -n "$HAS_AUDIO" ]; then
   ffmpeg -hwaccel cuda \
     -framerate "$EPISODE_FPS" \
@@ -67,6 +68,15 @@ else
     -c:v h264_nvenc -preset p4 -rc vbr -cq 18 \
     -vsync cfr \
     "/upscaled_video_files/$OUTPUT_FILE"
+fi
+
+# Defensive check: ffmpeg can occasionally exit 0 having written a
+# truncated/empty file (e.g. disk pressure, killed encoder thread).
+# Treat a missing or empty output as a hard failure.
+OUT_PATH="/upscaled_video_files/$OUTPUT_FILE"
+if [ ! -s "$OUT_PATH" ]; then
+  echo "ERROR: output file missing or empty after reassembly: $OUT_PATH" >&2
+  exit 1
 fi
 EOF
 
@@ -157,6 +167,8 @@ run_compose() {
       --project-name "$project" \
       down 2>/dev/null
   )
+  # Let GPU context/memory fully release before the next container starts.
+  sleep 2
   return $exit_code
 }
 
@@ -313,6 +325,9 @@ except Exception:
   NORMALIZE_FPS="$EPISODE_FPS"
   NORMALIZED_FILE="${FILENAME%.*}_normalized.mkv"
 
+  LOGS_DIR="$BASE_DIR/per_file_logs"
+  mkdir -p "$LOGS_DIR"
+  SAFE_NAME="${FILENAME%.*}"
   NORMALIZE_LOG="$BASE_DIR/normalize_run.log"
   docker run --rm \
     -v "$INPUT_DIR":/original_video_files \
@@ -328,6 +343,8 @@ except Exception:
     /normalize.sh \
     > "$NORMALIZE_LOG" 2>&1
   NORMALIZE_EXIT=$?
+  sleep 2  # let GPU context release before extract/upscale start
+  cp "$NORMALIZE_LOG" "$LOGS_DIR/${SAFE_NAME}_normalize.log" 2>/dev/null
 
   if [ $NORMALIZE_EXIT -ne 0 ] || [ ! -f "$INPUT_DIR/$NORMALIZED_FILE" ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed)" "$NORMALIZE_LOG" | tail -5)
@@ -345,6 +362,25 @@ except Exception:
   # From this point forward, operate on the normalized file.
   EPISODE_FILE="$NORMALIZED_FILE"
   FILE="$INPUT_DIR/$NORMALIZED_FILE"
+
+  # Re-probe audio on the NORMALIZED file. The pre-normalize HAS_AUDIO flag
+  # reflects the original source; if normalization dropped or failed to
+  # carry the audio track for any reason, reassembly's -map 1:a would
+  # otherwise fail with "Stream map matches no streams" (exit 1, no output).
+  NORMALIZED_AUDIO_COUNT=$(docker run --rm \
+    --entrypoint ffprobe \
+    -v "$INPUT_DIR":/original_video_files \
+    jrottenberg/ffmpeg:4.4-nvidia \
+    -v error -select_streams a \
+    -show_entries stream=index \
+    -of csv=p=0 \
+    /original_video_files/"$NORMALIZED_FILE" 2>/dev/null | wc -l)
+  if [ "$NORMALIZED_AUDIO_COUNT" -gt 0 ]; then
+    HAS_AUDIO="1"
+  else
+    HAS_AUDIO=""
+  fi
+  echo ">>> Normalized file audio streams: $NORMALIZED_AUDIO_COUNT"
 
   echo ">>> Cleaning up leftover frames..."
   rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
@@ -365,11 +401,30 @@ except Exception:
   rm -f "$POLL_SENTINEL"
   wait $POLL_PID 2>/dev/null
 
+  cp "$COMPOSE_LOG" "$LOGS_DIR/${SAFE_NAME}_extract_upscale.log" 2>/dev/null
+
   if [ $STAGE1_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
     echo "ERROR: Extract/upscale failed for $FILENAME"
     cp "$COMPOSE_LOG" "$LOG_FILE"
     echo -e "\n=== SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # Distinguish extract failures from upscale failures: check extracted
+  # frame count *before* trusting upscale's "0 frames in = 0 frames out,
+  # exit 0" success.
+  EXTRACTED_COUNT=$(ls "$FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
+  echo ">>> Extracted $EXTRACTED_COUNT source frames."
+  if [ "$EXTRACTED_COUNT" -eq 0 ]; then
+    ERROR_MSG="Extract produced 0 frames — normalized input may be unreadable or GPU context unavailable."
+    echo "ERROR: $ERROR_MSG"
+    echo "$ERROR_MSG" > "$LOG_FILE"
+    cat "$COMPOSE_LOG" >> "$LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
@@ -391,8 +446,9 @@ except Exception:
 
   if [ "$UPSCALED_COUNT" -eq 0 ]; then
     echo "ERROR: No upscaled frames found after renaming — upscale may have failed silently."
-    echo "No upscaled frames found after rename." > "$LOG_FILE"
-    update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found."
+    echo "No upscaled frames found after rename. Extracted $EXTRACTED_COUNT source frames." > "$LOG_FILE"
+    cat "$COMPOSE_LOG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found ($EXTRACTED_COUNT extracted)."
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
@@ -406,6 +462,7 @@ except Exception:
   REASSEMBLE_LOG="$BASE_DIR/reassemble_run.log"
   run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-general-reassemble" "$REASSEMBLE_LOG"
   STAGE2_EXIT=$?
+  cp "$REASSEMBLE_LOG" "$LOGS_DIR/${SAFE_NAME}_reassemble.log" 2>/dev/null
 
   if [ $STAGE2_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$REASSEMBLE_LOG" | tail -5)
@@ -414,6 +471,20 @@ except Exception:
     echo -e "\n=== REASSEMBLE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
     echo ">>> Error log written to $LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "Reassembly failed: $ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # Host-side belt-and-suspenders check: confirm the output actually landed
+  # and isn't a zero-byte file, regardless of what exit code compose reported.
+  if [ ! -s "$OUTPUT_DIR/$OUTPUT_FILE" ]; then
+    ERROR_MSG="Reassembly reported success but output file is missing or empty: $OUTPUT_DIR/$OUTPUT_FILE"
+    echo "ERROR: $ERROR_MSG"
+    cat "$COMPOSE_LOG" "$REASSEMBLE_LOG" > "$LOG_FILE"
+    echo -e "\n=== REASSEMBLE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
