@@ -27,7 +27,11 @@ fi
 cat > "$SCRIPTS_DIR/normalize.sh" << 'EOF'
 #!/bin/sh
 # Re-encodes any input into a known-good intermediate: CFR, deinterlaced,
-# AAC stereo (or no audio track if source has none), MKV container.
+# H264 video, AAC 48kHz stereo audio (or no audio track if source has none),
+# MKV container. Matches the profile of known-good upscale sources:
+#   Video: H264 (avc1), native resolution, CFR
+#   Audio: AAC, stereo, 48000 Hz
+#   Container: MKV
 # This guarantees extract/reassemble downstream always see a consistent format.
 VF_CHAIN="$NORMALIZE_VF"
 if [ -n "$HAS_AUDIO" ]; then
@@ -35,7 +39,7 @@ if [ -n "$HAS_AUDIO" ]; then
     -vf "$VF_CHAIN" \
     -r "$NORMALIZE_FPS" \
     -c:v h264_nvenc -preset p4 -rc vbr -cq 16 \
-    -c:a aac -b:a 192k -ac 2 \
+    -c:a aac -b:a 192k -ar 48000 -ac 2 \
     -vsync cfr \
     "/original_video_files/$NORMALIZED_FILE"
 else
