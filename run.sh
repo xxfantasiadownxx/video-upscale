@@ -162,6 +162,37 @@ with open(sf, "w") as fp: json.dump(s, fp, indent=2)
 PYEOF
 }
 
+clear_frames() {
+  # Removes all frame PNGs from both frame directories and VERIFIES they're
+  # actually gone. Containers run as root by default and write PNGs into
+  # these bind-mounted dirs as root; if this script isn't run with elevated
+  # perms, plain `rm -f` silently fails on those files (rm -f suppresses the
+  # permission-denied error) and they linger, getting tacked onto the next
+  # file's frame sequence. This function catches that instead of failing
+  # silently.
+  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null
+
+  local leftover_orig leftover_up
+  leftover_orig=$(find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
+  leftover_up=$(find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
+
+  if [ "$leftover_orig" -gt 0 ] || [ "$leftover_up" -gt 0 ]; then
+    echo ">>> WARNING: $leftover_orig + $leftover_up frame(s) survived rm -f — likely root-owned files written by a container. Retrying with sudo..."
+    sudo rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null
+
+    leftover_orig=$(find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
+    leftover_up=$(find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
+
+    if [ "$leftover_orig" -gt 0 ] || [ "$leftover_up" -gt 0 ]; then
+      echo "ERROR: Could not clear frame directories even with sudo. $leftover_orig left in $FRAMES_DIR, $leftover_up left in $UPSCALED_FRAMES_DIR."
+      echo "Frames from the previous file WILL bleed into the next file's sequence. Aborting batch."
+      echo "Fix: run this script with sudo, or add 'user: \"\$(id -u):\$(id -g)\"' to the relevant services in your docker-compose files so containers write as your host user instead of root."
+      exit 1
+    fi
+    echo ">>> Cleared with sudo."
+  fi
+}
+
 run_compose() {
   # Usage: run_compose <compose-file> <project-name> <log-file>
   # cd into BASE_DIR first so ./volume paths in compose files resolve correctly.
@@ -403,7 +434,7 @@ except Exception:
   echo ">>> Normalized file audio streams: $NORMALIZED_AUDIO_COUNT"
 
   echo ">>> Cleaning up leftover frames..."
-  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+  clear_frames
 
   # ── STAGE 1: Extract + Upscale ──────────────────
   update_status "$i" "$FILENAME" "running" "extracting" ""
@@ -431,7 +462,7 @@ except Exception:
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
-    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    clear_frames
     continue
   fi
 
@@ -448,7 +479,7 @@ except Exception:
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
-    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    clear_frames
     continue
   fi
 
@@ -471,7 +502,7 @@ except Exception:
     update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found ($EXTRACTED_COUNT extracted)."
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
-    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    clear_frames
     continue
   fi
 
@@ -493,7 +524,7 @@ except Exception:
     update_status "$i" "$FILENAME" "failed" "failed" "Reassembly failed: $ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
-    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    clear_frames
     continue
   fi
 
@@ -507,7 +538,7 @@ except Exception:
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
-    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    clear_frames
     continue
   fi
 
@@ -518,7 +549,7 @@ except Exception:
   mv "$FILE" "$INPUT_DIR/${FILENAME%.*}_original.${FILENAME##*.}"
 
   echo ">>> Cleaning up frames..."
-  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+  clear_frames
 
   update_status "$i" "$FILENAME" "done" "complete" ""
   set_file_time "$i" "end_time"
