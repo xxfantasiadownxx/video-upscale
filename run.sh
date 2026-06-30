@@ -170,7 +170,8 @@ clear_frames() {
   # permission-denied error) and they linger, getting tacked onto the next
   # file's frame sequence. This function catches that instead of failing
   # silently.
-  rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null
+  find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' -delete 2>/dev/null
+  find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' -delete 2>/dev/null
 
   local leftover_orig leftover_up
   leftover_orig=$(find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
@@ -178,7 +179,8 @@ clear_frames() {
 
   if [ "$leftover_orig" -gt 0 ] || [ "$leftover_up" -gt 0 ]; then
     echo ">>> WARNING: $leftover_orig + $leftover_up frame(s) survived rm -f — likely root-owned files written by a container. Retrying with sudo..."
-    sudo rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null
+    sudo find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' -delete 2>/dev/null
+    sudo find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' -delete 2>/dev/null
 
     leftover_orig=$(find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
     leftover_up=$(find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
@@ -469,7 +471,7 @@ except Exception:
   # Distinguish extract failures from upscale failures: check extracted
   # frame count *before* trusting upscale's "0 frames in = 0 frames out,
   # exit 0" success.
-  EXTRACTED_COUNT=$(ls "$FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
+  EXTRACTED_COUNT=$(find "$FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
   echo ">>> Extracted $EXTRACTED_COUNT source frames."
   if [ "$EXTRACTED_COUNT" -eq 0 ]; then
     ERROR_MSG="Extract produced 0 frames — normalized input may be unreadable or GPU context unavailable."
@@ -484,15 +486,19 @@ except Exception:
   fi
 
   # Real-ESRGAN appends _out to output filenames — rename before reassembly.
+  # Uses find -print0 instead of a glob expansion: a glob like
+  # frame*_out.png against 40,000+ files can hit shell argument-list
+  # limits on long episodes (works fine on short test clips, breaks
+  # silently on full-length files).
   echo ">>> Renaming upscaled frames..."
-  for f in "$UPSCALED_FRAMES_DIR"/frame*_out.png; do
-    [ -f "$f" ] || continue
-    base=$(basename "$f" _out.png)
-    mv "$f" "$UPSCALED_FRAMES_DIR/${base}.png"
-  done
+  find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*_out.png' -print0 2>/dev/null | \
+    while IFS= read -r -d '' f; do
+      base=$(basename "$f" _out.png)
+      mv "$f" "$UPSCALED_FRAMES_DIR/${base}.png"
+    done
 
   echo ">>> Verifying upscaled frames..."
-  UPSCALED_COUNT=$(ls "$UPSCALED_FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
+  UPSCALED_COUNT=$(find "$UPSCALED_FRAMES_DIR" -maxdepth 1 -name 'frame*.png' 2>/dev/null | wc -l)
   echo ">>> Found $UPSCALED_COUNT upscaled frames."
 
   if [ "$UPSCALED_COUNT" -eq 0 ]; then
